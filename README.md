@@ -1,4 +1,4 @@
-# homelab-deploy
+# vmforge
 
 Portable Bash orchestrator that automates VM provisioning on a Proxmox + OPNsense homelab:
 
