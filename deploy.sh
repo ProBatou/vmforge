@@ -197,7 +197,14 @@ _wizard_detect_resume_phase() {
   if [[ -z "${VMID:-}" || -z "${MAC_ADDRESS:-}" ]]; then echo "1"; return; fi
   if [[ -z "${KEA_RESERVATION_UUID:-}" ]];            then echo "2"; return; fi
   if [[ "${PROVISION_STATUS:-}" != "ssh_ready" ]];    then echo "3"; return; fi
-  if [[ -z "${PROXY_STATUS:-}" ]];                    then echo "proxy"; return; fi
+  if [[ -z "${PROXY_STATUS:-}" ]]; then
+    if should_run_flag "${ENABLE_PROXY:-${ENABLE_PHASE5:-auto}}" "${PROXY_PROVIDER:-none}"; then
+      echo "proxy"
+    else
+      echo "done"
+    fi
+    return
+  fi
   echo "done"
 }
 
@@ -545,7 +552,14 @@ detect_resume_phase() {
   if [[ -z "${VMID:-}" || -z "${MAC_ADDRESS:-}" ]]; then echo "1"; return; fi
   if [[ -z "${KEA_RESERVATION_UUID:-}" ]];           then echo "2"; return; fi
   if [[ "${PROVISION_STATUS:-}" != "ssh_ready" ]];   then echo "3"; return; fi
-  if [[ -z "${PROXY_STATUS:-}" ]];                   then echo "proxy"; return; fi
+  if [[ -z "${PROXY_STATUS:-}" ]]; then
+    if should_run_flag "${ENABLE_PROXY}" "${PROXY_PROVIDER}"; then
+      echo "proxy"
+    else
+      echo "done"
+    fi
+    return
+  fi
   echo "done"
 }
 
@@ -553,12 +567,16 @@ _should_run_phase() {
   # Returns 0 (true) if the given phase should execute, 1 (false) if it should be skipped.
   # Phase arg: "1" "2" "3" or "proxy"
   [[ "${DEPLOY_RESUME}" != "1" ]] && return 0
+  [[ "${DEPLOY_RESUME_FROM}" == "done" ]] && return 1
   local -a order=("1" "2" "3" "proxy")
-  local from_idx=0 phase_idx=0 i
+  local from_idx=-1 phase_idx=-1 i
   for i in "${!order[@]}"; do
     [[ "${order[$i]}" == "${DEPLOY_RESUME_FROM}" ]] && from_idx=$i
     [[ "${order[$i]}" == "$1" ]]                    && phase_idx=$i
   done
+  if [[ "${from_idx}" -lt 0 || "${phase_idx}" -lt 0 ]]; then
+    return 1
+  fi
   [[ "${phase_idx}" -ge "${from_idx}" ]]
 }
 
@@ -649,6 +667,10 @@ if [[ "${DEPLOY_RESUME}" == "1" ]]; then
       exit 1
     fi
     DEPLOY_RESUME_FROM="$(detect_resume_phase)"
+  fi
+  if [[ "${DEPLOY_RESUME_FROM}" == "done" ]]; then
+    log "Nothing to resume for '${APP_NAME}' (all phases already complete for current settings)."
+    exit 0
   fi
   log "Resuming '${APP_NAME}' (phase ${DEPLOY_RESUME_FROM}) — rollback disabled."
 else
