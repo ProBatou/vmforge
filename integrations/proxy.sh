@@ -19,6 +19,126 @@ proxy_apply() {
   esac
 }
 
+proxy_auth_method_to_label() {
+  local method="$1"
+  case "${method}" in
+    0) echo "none" ;;
+    1) echo "basic" ;;
+    2) echo "forward" ;;
+    3) echo "oauth2" ;;
+    4) echo "zoraxy" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+proxy_resolve_auth_method() {
+  local method_raw="${PROXY_AUTH_TYPE:-${PROXY_AUTH_METHOD:-${PROXY_AUTH_PROVIDER:-}}}"
+  local legacy_basic="${PROXY_REQUIRE_BASIC_AUTH:-false}"
+  local normalized
+
+  if [[ -z "${method_raw}" ]]; then
+    normalized="$(printf '%s' "${legacy_basic}" | tr '[:upper:]' '[:lower:]')"
+    case "${normalized}" in
+      1|true|yes|on)
+        echo "1"
+        return 0
+        ;;
+      *)
+        echo "0"
+        return 0
+        ;;
+    esac
+  fi
+
+  normalized="$(printf '%s' "${method_raw}" | tr '[:upper:]' '[:lower:]')"
+  case "${normalized}" in
+    0|none|off|disabled|disable|skip)
+      echo "0"
+      ;;
+    1|basic|basic_auth|basicauth)
+      echo "1"
+      ;;
+    2|forward|forward_auth|forwardauth)
+      echo "2"
+      ;;
+    3|oauth2|oauth|oauth_2)
+      echo "3"
+      ;;
+    4|zoraxy|zoraxy_auth|zoraxyauth)
+      echo "4"
+      ;;
+    *)
+      echo "ERROR: invalid PROXY_AUTH_TYPE '${method_raw}' (expected: none|basic|forward|oauth2|zoraxy or 0..4)" >&2
+      return 1
+      ;;
+  esac
+}
+
+proxy_build_basic_auth_json() {
+  local method="$1"
+  local creds_json="${PROXY_BASIC_AUTH_JSON:-}"
+  local username="${PROXY_AUTH_BASIC_USERNAME:-${PROXY_BASIC_AUTH_USERNAME:-}}"
+  local password="${PROXY_AUTH_BASIC_PASSWORD:-${PROXY_BASIC_AUTH_PASSWORD:-}}"
+
+  if [[ "${method}" != "1" ]]; then
+    echo "[]"
+    return 0
+  fi
+
+  if [[ -n "${creds_json}" ]]; then
+    if ! printf '%s' "${creds_json}" | jq -e '
+      (type == "array") and
+      all(.[]; (type == "object") and has("username") and has("password"))' > /dev/null 2>&1; then
+      echo "ERROR: PROXY_BASIC_AUTH_JSON must be a JSON array of objects with username/password keys." >&2
+      return 1
+    fi
+    echo "${creds_json}"
+    return 0
+  fi
+
+  if [[ -n "${username}" || -n "${password}" ]]; then
+    if [[ -z "${username}" || -z "${password}" ]]; then
+      echo "ERROR: both PROXY_AUTH_BASIC_USERNAME and PROXY_AUTH_BASIC_PASSWORD are required for basic auth." >&2
+      return 1
+    fi
+    jq -cn --arg username "${username}" --arg password "${password}" \
+      '[{username:$username,password:$password}]'
+    return 0
+  fi
+
+  echo "ERROR: basic auth requires credentials. Set PROXY_AUTH_BASIC_USERNAME/PROXY_AUTH_BASIC_PASSWORD or PROXY_BASIC_AUTH_JSON." >&2
+  return 1
+}
+
+proxy_apply_zoraxy_auth_settings() {
+  local api_base="$1"
+  local cookie_file="$2"
+  local csrf_token="$3"
+  local auth_method="$4"
+  local basic_auth_json="$5"
+
+  log "Applying auth settings for ${SUBDOMAIN} (type=$(proxy_auth_method_to_label "${auth_method}"))..."
+
+  curl -fsS --max-time 10 \
+    -b "${cookie_file}" \
+    -H "X-CSRF-Token: ${csrf_token}" \
+    -X POST "${api_base}/api/proxy/edit" \
+    --data-urlencode "type=host" \
+    --data-urlencode "rootname=${SUBDOMAIN}" \
+    --data-urlencode "authprovider=${auth_method}" \
+    > /dev/null
+
+  if [[ "${auth_method}" == "1" ]]; then
+    curl -fsS --max-time 10 \
+      -b "${cookie_file}" \
+      -H "X-CSRF-Token: ${csrf_token}" \
+      -X POST "${api_base}/api/proxy/updateCredentials" \
+      --data-urlencode "ep=${SUBDOMAIN}" \
+      --data-urlencode "creds=${basic_auth_json}" \
+      > /dev/null
+  fi
+}
+
 proxy_endpoint_responds() {
   local host="$1"
   local port="$2"
@@ -112,7 +232,9 @@ proxy_apply_zoraxy_api() {
   local skip_tls_validation="${PROXY_SKIP_TLS_VALIDATION:-false}"
   local skip_websocket_origin_check="${PROXY_SKIP_WS_ORIGIN_CHECK:-true}"
   local bypass_global_tls="${PROXY_BYPASS_GLOBAL_TLS:-false}"
-  local require_basic_auth="${PROXY_REQUIRE_BASIC_AUTH:-false}"
+  local auth_method
+  local auth_label
+  local require_basic_auth="false"
   local require_rate_limit="${PROXY_REQUIRE_RATE_LIMIT:-false}"
   local rate_limit="${PROXY_RATE_LIMIT:-1000}"
   local access_rule="${PROXY_ACCESS_RULE:-default}"
@@ -124,14 +246,21 @@ proxy_apply_zoraxy_api() {
   local block_common_exploits="${PROXY_BLOCK_COMMON_EXPLOITS:-false}"
   local block_ai_crawlers="${PROXY_BLOCK_AI_CRAWLERS:-false}"
   local mitigation_action="${PROXY_MITIGATION_ACTION:-0}"
-  local basic_auth_json="${PROXY_BASIC_AUTH_JSON:-[]}"
+  local basic_auth_json="[]"
   local tmp_dir cookie_file html_file csrf_token list_json
-  local existing_rule existing_origin existing_tls
+  local existing_rule existing_origin existing_tls existing_auth_method
 
   if [[ -z "${api_base}" ]]; then
     echo "ERROR: ZORAXY_API_BASE is not set (example: http://zoraxy.example.com:8400)" >&2
     return 1
   fi
+
+  auth_method="$(proxy_resolve_auth_method)" || return 1
+  auth_label="$(proxy_auth_method_to_label "${auth_method}")"
+  if [[ "${auth_method}" == "1" ]]; then
+    require_basic_auth="true"
+  fi
+  basic_auth_json="$(proxy_build_basic_auth_json "${auth_method}")" || return 1
 
   upstream_port="$(proxy_resolve_upstream_port "${upstream_host}" "${use_tls_upstream}")" || return 1
   upstream="${upstream_host}:${upstream_port}"
@@ -184,21 +313,30 @@ proxy_apply_zoraxy_api() {
        "MISSING"
      else
        ( $m[0].ActiveOrigins // [] ) as $o |
+       ( $m[0].AuthenticationProvider.AuthMethod // 0 ) as $a |
        if ($o | length) > 0 then
-         "FOUND\t" + ($o[0].OriginIpOrDomain // "") + "\t" + (if $o[0].RequireTLS then "true" else "false" end)
+         "FOUND\t" + ($o[0].OriginIpOrDomain // "") + "\t" + (if $o[0].RequireTLS then "true" else "false" end) + "\t" + ($a | tostring)
        else
-         "FOUND\t\tfalse"
+         "FOUND\t\tfalse\t" + ($a | tostring)
        end
      end')"
 
   if [[ "${existing_rule}" == FOUND$'\t'* ]]; then
     existing_origin="$(printf '%s' "${existing_rule}" | cut -f2)"
     existing_tls="$(printf '%s' "${existing_rule}" | cut -f3)"
+    existing_auth_method="$(printf '%s' "${existing_rule}" | cut -f4)"
     if [[ "${existing_origin}" == "${upstream}" && "${existing_tls}" == "${use_tls_upstream}" ]]; then
       log "Proxy rule already correct for ${SUBDOMAIN} -> ${upstream} (TLS upstream=${use_tls_upstream})."
+      if [[ "${existing_auth_method}" != "${auth_method}" || "${auth_method}" == "1" ]]; then
+        proxy_apply_zoraxy_auth_settings "${api_base}" "${cookie_file}" "${csrf_token}" "${auth_method}" "${basic_auth_json}" || return 1
+      fi
       state_set PROXY_STATUS "already_present"
       state_set PROXY_PROVIDER "zoraxy_api"
       state_set PROXY_UPSTREAM "${upstream}"
+      state_set PROXY_UPSTREAM_TLS "${use_tls_upstream}"
+      state_set PROXY_API_BASE "${api_base}"
+      state_set PROXY_AUTH_TYPE "${auth_label}"
+      state_set PROXY_AUTH_METHOD "${auth_method}"
       trap - RETURN
       rm -rf "${tmp_dir}"
       return 0
@@ -225,6 +363,7 @@ proxy_apply_zoraxy_api() {
     --data-urlencode "tlsval=${skip_tls_validation}" \
     --data-urlencode "bpwsorg=${skip_websocket_origin_check}" \
     --data-urlencode "bypassGlobalTLS=${bypass_global_tls}" \
+    --data-urlencode "authprovider=${auth_method}" \
     --data-urlencode "bauth=${require_basic_auth}" \
     --data-urlencode "rate=${require_rate_limit}" \
     --data-urlencode "ratenum=${rate_limit}" \
@@ -240,6 +379,8 @@ proxy_apply_zoraxy_api() {
     --data-urlencode "mitigationAction=${mitigation_action}" \
     > /dev/null
 
+  proxy_apply_zoraxy_auth_settings "${api_base}" "${cookie_file}" "${csrf_token}" "${auth_method}" "${basic_auth_json}" || return 1
+
   # Verify the rule was created correctly
   list_json="$(curl -fsS --max-time 10 "${api_base}/api/proxy/list?type=host")"
   local verify_result
@@ -247,13 +388,15 @@ proxy_apply_zoraxy_api() {
     --arg domain "${SUBDOMAIN}" \
     --arg target "${upstream}" \
     --argjson tls_target "$([ "${use_tls_upstream}" = "true" ] && echo "true" || echo "false")" \
+    --argjson auth_target "${auth_method}" \
     '( [ .[] | select( (.RootOrMatchingDomain // "") | ascii_downcase == ($domain | ascii_downcase) ) ] ) as $m |
      if ($m | length) == 0 then "MISSING"
      else
+       ( $m[0].AuthenticationProvider.AuthMethod // 0 ) as $a |
        ( $m[0].ActiveOrigins // [] ) as $o |
        if ($o | length) == 0 then "NO_ORIGINS"
-       elif ($o[0].OriginIpOrDomain == $target) and (($o[0].RequireTLS // false) == $tls_target) then "OK"
-       else "MISMATCH\t" + ($o[0].OriginIpOrDomain // "") + " tls=" + (($o[0].RequireTLS // false) | tostring)
+       elif ($o[0].OriginIpOrDomain == $target) and (($o[0].RequireTLS // false) == $tls_target) and ($a == $auth_target) then "OK"
+       else "MISMATCH\t" + ($o[0].OriginIpOrDomain // "") + " tls=" + (($o[0].RequireTLS // false) | tostring) + " auth=" + ($a | tostring)
        end
      end')"
 
@@ -278,6 +421,8 @@ proxy_apply_zoraxy_api() {
   state_set PROXY_UPSTREAM "${upstream}"
   state_set PROXY_UPSTREAM_TLS "${use_tls_upstream}"
   state_set PROXY_API_BASE "${api_base}"
+  state_set PROXY_AUTH_TYPE "${auth_label}"
+  state_set PROXY_AUTH_METHOD "${auth_method}"
 
   log "=== Proxy integration completed: ${SUBDOMAIN} -> ${upstream} ==="
 

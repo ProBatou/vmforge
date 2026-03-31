@@ -188,6 +188,13 @@ ZORAXY_USERNAME="admin"       # optional, if auth is enabled
 ZORAXY_PASSWORD="yourpassword"
 
 ENABLE_PROXY="auto"           # auto | 1 | 0
+
+# optional subdomain authentication policy
+PROXY_AUTH_TYPE="none"        # none | basic | forward | oauth2 | zoraxy
+PROXY_AUTH_BASIC_USERNAME=""  # required if PROXY_AUTH_TYPE=basic
+PROXY_AUTH_BASIC_PASSWORD=""  # required if PROXY_AUTH_TYPE=basic
+# or provide multiple credentials as JSON:
+# PROXY_BASIC_AUTH_JSON='[{"username":"alice","password":"secret"}]'
 ```
 
 Upstream port detection:
@@ -224,7 +231,9 @@ Use `strict` to fail when multiple ports respond (avoids guessing in ambiguous s
 
 ## Deployment State
 
-Each run saves state to `.deploy-state/<app-name>.env` (git-ignored). It records the VMID, MAC address, DHCP reservation UUID, and proxy status. This file is for reference and debugging — it is not required for the script to run.
+Each run writes state to `.deploy-state/<app-name>.env` (git-ignored) while running. By default, this file is deleted at the end of a successful run.  
+Set `DEPLOY_KEEP_STATE_ON_SUCCESS=1` if you want to keep it for debugging/reference.  
+On failures/interrupted runs, the file remains available so you can inspect or resume.
 
 ---
 

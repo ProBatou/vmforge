@@ -253,11 +253,13 @@ should_run_flag() {
 run_interactive_wizard() {
   local mode_choice=""
   local provider_choice=""
+  local auth_type_choice=""
   local vmid_choice=""
   local launch_now=""
   local auth_choice_default="n"
   local current_mode="${DEPLOY_FLOW:-full}"
   local current_proxy_provider="${PROXY_PROVIDER:-none}"
+  local current_proxy_auth_type="${PROXY_AUTH_TYPE:-}"
   local current_proxy_flag="${ENABLE_PROXY:-${ENABLE_PHASE5:-auto}}"
   local current_port_mode="auto"
   local current_vmid_policy="${PROXMOX_VMID_POLICY:-${PROXMOX_VMID_MODE:-nextid}}"
@@ -427,6 +429,62 @@ run_interactive_wizard() {
         ZORAXY_PASSWORD=""
       fi
 
+      if [[ -z "${current_proxy_auth_type}" ]]; then
+        case "$(printf '%s' "${PROXY_REQUIRE_BASIC_AUTH:-false}" | tr '[:upper:]' '[:lower:]')" in
+          1|true|yes|on) current_proxy_auth_type="basic" ;;
+          *) current_proxy_auth_type="none" ;;
+        esac
+      fi
+      case "$(printf '%s' "${current_proxy_auth_type}" | tr '[:upper:]' '[:lower:]')" in
+        none|0|off|disabled|skip) auth_type_choice="1" ;;
+        basic|1|basic_auth|basicauth) auth_type_choice="2" ;;
+        forward|2|forward_auth|forwardauth) auth_type_choice="3" ;;
+        oauth2|oauth|3|oauth_2) auth_type_choice="4" ;;
+        zoraxy|4|zoraxy_auth|zoraxyauth) auth_type_choice="5" ;;
+        *) auth_type_choice="1" ;;
+      esac
+
+      while true; do
+        echo ""
+        echo "Subdomain authentication:"
+        echo "  1) none"
+        echo "  2) basic"
+        echo "  3) forward"
+        echo "  4) oauth2"
+        echo "  5) zoraxy"
+        read -r -p "Auth type [${auth_type_choice}]: " current_proxy_auth_type
+        current_proxy_auth_type="${current_proxy_auth_type:-${auth_type_choice}}"
+        case "${current_proxy_auth_type}" in
+          1) PROXY_AUTH_TYPE="none"; PROXY_REQUIRE_BASIC_AUTH="false"; break ;;
+          2) PROXY_AUTH_TYPE="basic"; PROXY_REQUIRE_BASIC_AUTH="true"; break ;;
+          3) PROXY_AUTH_TYPE="forward"; PROXY_REQUIRE_BASIC_AUTH="false"; break ;;
+          4) PROXY_AUTH_TYPE="oauth2"; PROXY_REQUIRE_BASIC_AUTH="false"; break ;;
+          5) PROXY_AUTH_TYPE="zoraxy"; PROXY_REQUIRE_BASIC_AUTH="false"; break ;;
+          none|off|disabled|skip) PROXY_AUTH_TYPE="none"; PROXY_REQUIRE_BASIC_AUTH="false"; break ;;
+          basic|basic_auth|basicauth) PROXY_AUTH_TYPE="basic"; PROXY_REQUIRE_BASIC_AUTH="true"; break ;;
+          forward|forward_auth|forwardauth) PROXY_AUTH_TYPE="forward"; PROXY_REQUIRE_BASIC_AUTH="false"; break ;;
+          oauth2|oauth|oauth_2) PROXY_AUTH_TYPE="oauth2"; PROXY_REQUIRE_BASIC_AUTH="false"; break ;;
+          zoraxy|zoraxy_auth|zoraxyauth) PROXY_AUTH_TYPE="zoraxy"; PROXY_REQUIRE_BASIC_AUTH="false"; break ;;
+          *) echo "Invalid choice." ;;
+        esac
+      done
+
+      if [[ "${PROXY_AUTH_TYPE}" == "basic" ]]; then
+        while true; do
+          prompt_default PROXY_AUTH_BASIC_USERNAME "Basic auth username" "${PROXY_AUTH_BASIC_USERNAME:-${PROXY_BASIC_AUTH_USERNAME:-}}"
+          prompt_default PROXY_AUTH_BASIC_PASSWORD "Basic auth password" "${PROXY_AUTH_BASIC_PASSWORD:-${PROXY_BASIC_AUTH_PASSWORD:-}}" "1"
+          if [[ -z "${PROXY_AUTH_BASIC_USERNAME}" || -z "${PROXY_AUTH_BASIC_PASSWORD}" ]]; then
+            echo "Username/password cannot be empty for basic auth."
+            continue
+          fi
+          PROXY_BASIC_AUTH_JSON=""
+          break
+        done
+      else
+        PROXY_AUTH_BASIC_USERNAME=""
+        PROXY_AUTH_BASIC_PASSWORD=""
+      fi
+
       if [[ -n "${PROXY_UPSTREAM_PORT:-}" ]]; then
         current_port_mode="manual"
       fi
@@ -465,6 +523,12 @@ run_interactive_wizard() {
     fi
   fi
   echo "  Proxy    : ${PROXY_PROVIDER:-none}"
+  if [[ "${PROXY_PROVIDER}" == "zoraxy_api" ]]; then
+    echo "  Auth     : ${PROXY_AUTH_TYPE:-none}"
+    if [[ "${PROXY_AUTH_TYPE:-none}" == "basic" && -n "${PROXY_AUTH_BASIC_USERNAME:-${PROXY_BASIC_AUTH_USERNAME:-}}" ]]; then
+      echo "  Auth user: ${PROXY_AUTH_BASIC_USERNAME:-${PROXY_BASIC_AUTH_USERNAME:-}}"
+    fi
+  fi
   echo ""
   read -r -p "Run now? [Y/n]: " launch_now
   launch_now="$(printf '%s' "${launch_now:-y}" | tr '[:upper:]' '[:lower:]')"
@@ -598,6 +662,25 @@ _should_run_phase() {
   [[ "${phase_idx}" -ge "${from_idx}" ]]
 }
 
+_should_keep_state_on_success() {
+  local keep_raw="${DEPLOY_KEEP_STATE_ON_SUCCESS:-0}"
+  local keep
+  keep="$(printf '%s' "${keep_raw}" | tr '[:upper:]' '[:lower:]')"
+
+  case "${keep}" in
+    1|true|yes|on)
+      return 0
+      ;;
+    0|false|no|off|"")
+      return 1
+      ;;
+    *)
+      echo "ERROR: invalid DEPLOY_KEEP_STATE_ON_SUCCESS '${keep_raw}' (expected: 1|0|true|false|yes|no|on|off)" >&2
+      exit 1
+      ;;
+  esac
+}
+
 # Defaults (override via .env)
 DEPLOY_FLOW="${DEPLOY_FLOW:-full}"
 
@@ -618,7 +701,13 @@ OPNSENSE_API_KEY="${OPNSENSE_API_KEY:-}"
 OPNSENSE_API_SECRET="${OPNSENSE_API_SECRET:-}"
 
 DEPLOY_STATE_DIR="${DEPLOY_STATE_DIR:-${SCRIPT_DIR}/.deploy-state}"
+DEPLOY_KEEP_STATE_ON_SUCCESS="${DEPLOY_KEEP_STATE_ON_SUCCESS:-0}"
 PROXY_PROVIDER="${PROXY_PROVIDER:-none}"
+PROXY_AUTH_TYPE="${PROXY_AUTH_TYPE:-}"
+PROXY_AUTH_METHOD="${PROXY_AUTH_METHOD:-}"
+PROXY_AUTH_BASIC_USERNAME="${PROXY_AUTH_BASIC_USERNAME:-${PROXY_BASIC_AUTH_USERNAME:-}}"
+PROXY_AUTH_BASIC_PASSWORD="${PROXY_AUTH_BASIC_PASSWORD:-${PROXY_BASIC_AUTH_PASSWORD:-}}"
+PROXY_BASIC_AUTH_JSON="${PROXY_BASIC_AUTH_JSON:-}"
 ZORAXY_API_BASE="${ZORAXY_API_BASE:-}"
 ZORAXY_USERNAME="${ZORAXY_USERNAME:-}"
 ZORAXY_PASSWORD="${ZORAXY_PASSWORD:-}"
@@ -779,6 +868,22 @@ esac
 
 VMID="$(state_get VMID)"
 MAC_ADDRESS="$(state_get MAC_ADDRESS)"
+state_file_display="${DEPLOY_STATE_FILE:-}"
+
+if _should_keep_state_on_success; then
+  :
+else
+  if [[ -n "${DEPLOY_STATE_FILE:-}" && -f "${DEPLOY_STATE_FILE}" ]]; then
+    if rm -f "${DEPLOY_STATE_FILE}"; then
+      log "Removed state file after successful run."
+      state_file_display="(removed on success)"
+    else
+      log "WARNING: could not remove state file at ${DEPLOY_STATE_FILE}."
+    fi
+  else
+    state_file_display="(not found)"
+  fi
+fi
 
 echo ""
 echo "  App       : ${APP_NAME}"
@@ -787,5 +892,5 @@ echo "  MAC       : ${MAC_ADDRESS}"
 echo "  IP        : ${TARGET_IP}"
 echo "  Domain    : ${SUBDOMAIN}"
 echo "  Mode      : ${DEPLOY_FLOW}"
-echo "  State file: ${DEPLOY_STATE_FILE}"
+echo "  State file: ${state_file_display}"
 echo ""
