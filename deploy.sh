@@ -14,10 +14,12 @@ show_usage() {
   cat <<EOF
 Usage:
   $0 <app-name> <target-ip> <subdomain>
+  $0 --resume <app-name>
   $0 --wizard
 
 Examples:
   $0 gitea 10.0.0.50 git.example.com
+  $0 --resume gitea
   $0 --wizard
 EOF
 }
@@ -172,6 +174,33 @@ wizard_configure_env_if_missing() {
   echo ""
 }
 
+# ── Wizard-time resume helpers (available before libs are sourced) ───────────
+
+_wizard_state_file_for() {
+  local app_name="$1"
+  local safe_name
+  safe_name="$(printf '%s' "${app_name}" | tr -c 'A-Za-z0-9._-' '_')"
+  if [[ -z "${safe_name}" ]]; then safe_name="app"; fi
+  printf '%s/%s.env' "${DEPLOY_STATE_DIR:-${SCRIPT_DIR}/.deploy-state}" "${safe_name}"
+}
+
+_wizard_load_state() {
+  local state_file="$1"
+  if [[ -f "${state_file}" ]]; then
+    # shellcheck disable=SC1090
+    source "${state_file}"
+  fi
+}
+
+_wizard_detect_resume_phase() {
+  # Returns: "1" "2" "3" "proxy" or "done"
+  if [[ -z "${VMID:-}" || -z "${MAC_ADDRESS:-}" ]]; then echo "1"; return; fi
+  if [[ -z "${KEA_RESERVATION_UUID:-}" ]];            then echo "2"; return; fi
+  if [[ "${PROVISION_STATUS:-}" != "ssh_ready" ]];    then echo "3"; return; fi
+  if [[ -z "${PROXY_STATUS:-}" ]];                    then echo "proxy"; return; fi
+  echo "done"
+}
+
 should_run_flag() {
   local flag_raw="$1"
   local provider_raw="$2"
@@ -226,6 +255,48 @@ run_interactive_wizard() {
   echo ""
 
   prompt_default APP_NAME "App name" "${APP_NAME:-myapp}"
+
+  # ── Resume detection ─────────────────────────────────────────────────────────
+  local _state_file _resume_from=""
+  _state_file="$(_wizard_state_file_for "${APP_NAME}")"
+  if [[ -f "${_state_file}" ]]; then
+    _wizard_load_state "${_state_file}"
+    _resume_from="$(_wizard_detect_resume_phase)"
+    if [[ "${_resume_from}" != "done" && "${_resume_from}" != "1" ]]; then
+      echo ""
+      echo "  Incomplete deployment found for '${APP_NAME}':"
+      [[ -n "${STARTED_AT:-}"  ]]                     && echo "    Started : ${STARTED_AT}"
+      [[ -n "${VMID:-}"        ]]                     && echo "    VMID    : ${VMID}"
+      [[ -n "${RESERVED_IP:-}" ]]                     && echo "    IP      : ${RESERVED_IP}"
+      [[ "${PROVISION_STATUS:-}" == "ssh_ready" ]]    && echo "    VM      : ready (SSH up)"
+      echo "    Resume  : starting from phase ${_resume_from}"
+      echo ""
+      local _do_resume=""
+      read -r -p "Resume from phase ${_resume_from}? [Y/n]: " _do_resume
+      _do_resume="$(printf '%s' "${_do_resume:-y}" | tr '[:upper:]' '[:lower:]')"
+      if [[ "${_do_resume}" != "n" && "${_do_resume}" != "no" ]]; then
+        DEPLOY_RESUME="1"
+        DEPLOY_RESUME_FROM="${_resume_from}"
+        DEPLOY_STATE_FILE="${_state_file}"
+        echo ""
+        echo "Summary (resume):"
+        echo "  App      : ${APP_NAME}"
+        echo "  Target   : ${TARGET_IP}"
+        echo "  Domain   : ${SUBDOMAIN}"
+        echo "  Resume   : phase ${_resume_from}"
+        echo ""
+        read -r -p "Run now? [Y/n]: " launch_now
+        launch_now="$(printf '%s' "${launch_now:-y}" | tr '[:upper:]' '[:lower:]')"
+        if [[ "${launch_now}" == "n" || "${launch_now}" == "no" ]]; then
+          echo "Cancelled."
+          exit 0
+        fi
+        return
+      fi
+    fi
+  fi
+  # ── End resume detection ──────────────────────────────────────────────────────
+
   prompt_default TARGET_IP "Target IP" "${TARGET_IP:-10.0.0.50}"
   prompt_default SUBDOMAIN "Subdomain" "${SUBDOMAIN:-myapp.example.com}"
   validate_app_name "${APP_NAME}"
@@ -379,12 +450,17 @@ run_interactive_wizard() {
 }
 
 WIZARD_MODE="0"
+DEPLOY_RESUME="0"
 declare -a POSITIONAL_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help)
       show_usage
       exit 0
+      ;;
+    -r|--resume)
+      DEPLOY_RESUME="1"
+      shift
       ;;
     -w|--wizard|--interactive)
       WIZARD_MODE="1"
@@ -417,6 +493,14 @@ fi
 
 if [[ "${WIZARD_MODE}" == "1" || ( $# -eq 0 && -t 0 && -t 1 ) ]]; then
   run_interactive_wizard
+elif [[ "${DEPLOY_RESUME}" == "1" ]]; then
+  if [[ $# -ne 1 ]]; then
+    echo "Usage: $0 --resume <app-name>" >&2
+    exit 1
+  fi
+  APP_NAME="$1"
+  validate_app_name "${APP_NAME}"
+  # TARGET_IP and SUBDOMAIN will be loaded from state after libs are sourced
 else
   if [[ $# -ne 3 ]]; then
     show_usage
@@ -452,6 +536,31 @@ source "${SCRIPT_DIR}/modules/proxmox.sh"
 source "${SCRIPT_DIR}/modules/dhcp.sh"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/integrations/proxy.sh"
+
+DEPLOY_RESUME="${DEPLOY_RESUME:-0}"
+DEPLOY_RESUME_FROM="${DEPLOY_RESUME_FROM:-1}"
+
+detect_resume_phase() {
+  # Returns the first phase not yet completed: "1" "2" "3" "proxy" or "done"
+  if [[ -z "${VMID:-}" || -z "${MAC_ADDRESS:-}" ]]; then echo "1"; return; fi
+  if [[ -z "${KEA_RESERVATION_UUID:-}" ]];           then echo "2"; return; fi
+  if [[ "${PROVISION_STATUS:-}" != "ssh_ready" ]];   then echo "3"; return; fi
+  if [[ -z "${PROXY_STATUS:-}" ]];                   then echo "proxy"; return; fi
+  echo "done"
+}
+
+_should_run_phase() {
+  # Returns 0 (true) if the given phase should execute, 1 (false) if it should be skipped.
+  # Phase arg: "1" "2" "3" or "proxy"
+  [[ "${DEPLOY_RESUME}" != "1" ]] && return 0
+  local -a order=("1" "2" "3" "proxy")
+  local from_idx=0 phase_idx=0 i
+  for i in "${!order[@]}"; do
+    [[ "${order[$i]}" == "${DEPLOY_RESUME_FROM}" ]] && from_idx=$i
+    [[ "${order[$i]}" == "$1" ]]                    && phase_idx=$i
+  done
+  [[ "${phase_idx}" -ge "${from_idx}" ]]
+}
 
 # Defaults (override via .env)
 DEPLOY_FLOW="${DEPLOY_FLOW:-full}"
@@ -522,7 +631,29 @@ if [[ "${DEPLOY_FLOW}" == "full" || "${DEPLOY_FLOW}" == "proxy" ]]; then
 fi
 
 init_common_context
-state_begin_run "${APP_NAME}" "${TARGET_IP}" "${SUBDOMAIN}"
+
+if [[ "${DEPLOY_RESUME}" == "1" ]]; then
+  if [[ -z "${DEPLOY_STATE_FILE:-}" ]]; then
+    # CLI --resume path: libs are now sourced, resolve state file
+    DEPLOY_STATE_FILE="$(state_file_for "${APP_NAME}")"
+    export DEPLOY_STATE_FILE
+    if [[ ! -f "${DEPLOY_STATE_FILE}" ]]; then
+      echo "ERROR: no deployment state found for '${APP_NAME}' at ${DEPLOY_STATE_FILE}" >&2
+      exit 1
+    fi
+    state_load
+    TARGET_IP="${TARGET_IP:-}"
+    SUBDOMAIN="${SUBDOMAIN:-}"
+    if [[ -z "${TARGET_IP}" || -z "${SUBDOMAIN}" ]]; then
+      echo "ERROR: state file is missing TARGET_IP or SUBDOMAIN" >&2
+      exit 1
+    fi
+    DEPLOY_RESUME_FROM="$(detect_resume_phase)"
+  fi
+  log "Resuming '${APP_NAME}' (phase ${DEPLOY_RESUME_FROM}) — rollback disabled."
+else
+  state_begin_run "${APP_NAME}" "${TARGET_IP}" "${SUBDOMAIN}"
+fi
 
 _rollback_on_failure() {
   log "Deploy failed — starting rollback..."
@@ -551,10 +682,22 @@ _rollback_on_failure() {
 
 case "${DEPLOY_FLOW}" in
   full)
-    trap '_rollback_on_failure' ERR
-    phase1_proxmox_prepare
-    phase2_dhcp_reserve_kea
-    phase3_proxmox_boot_and_wait
+    if [[ "${DEPLOY_RESUME}" != "1" ]]; then trap '_rollback_on_failure' ERR; fi
+    if _should_run_phase "1"; then
+      phase1_proxmox_prepare
+    else
+      log "Skipping phase1 — VM already cloned (VMID=${VMID})."
+    fi
+    if _should_run_phase "2"; then
+      phase2_dhcp_reserve_kea
+    else
+      log "Skipping phase2 — DHCP reservation already exists."
+    fi
+    if _should_run_phase "3"; then
+      phase3_proxmox_boot_and_wait
+    else
+      log "Skipping phase3 — VM already SSH-ready."
+    fi
     trap - ERR
 
     if should_run_flag "${ENABLE_PROXY}" "${PROXY_PROVIDER}"; then
@@ -564,11 +707,23 @@ case "${DEPLOY_FLOW}" in
     fi
     ;;
   provision)
-    trap '_rollback_on_failure' ERR
+    if [[ "${DEPLOY_RESUME}" != "1" ]]; then trap '_rollback_on_failure' ERR; fi
     log "Running in provision mode (VM provisioning only)."
-    phase1_proxmox_prepare
-    phase2_dhcp_reserve_kea
-    phase3_proxmox_boot_and_wait
+    if _should_run_phase "1"; then
+      phase1_proxmox_prepare
+    else
+      log "Skipping phase1 — VM already cloned (VMID=${VMID})."
+    fi
+    if _should_run_phase "2"; then
+      phase2_dhcp_reserve_kea
+    else
+      log "Skipping phase2 — DHCP reservation already exists."
+    fi
+    if _should_run_phase "3"; then
+      phase3_proxmox_boot_and_wait
+    else
+      log "Skipping phase3 — VM already SSH-ready."
+    fi
     trap - ERR
     log "Proxy step not executed in provision mode."
     ;;

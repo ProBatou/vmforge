@@ -34,6 +34,14 @@ state_load() {
   fi
 }
 
+state_file_for() {
+  local app_name="$1"
+  local safe_name
+  safe_name="$(sanitize_name "${app_name}")"
+  if [[ -z "${safe_name}" ]]; then safe_name="app"; fi
+  printf '%s/%s.env' "${DEPLOY_STATE_DIR}" "${safe_name}"
+}
+
 state_set() {
   local key="$1"
   local value="$2"
