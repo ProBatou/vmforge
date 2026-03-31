@@ -98,8 +98,12 @@ validate_ipv4() {
 }
 
 wizard_configure_env_if_missing() {
+  local requested_flow="${1:-${DEPLOY_FLOW:-full}}"
+  local requested_flow_lc
   local create_env="y"
   local vmid_mode=""
+
+  requested_flow_lc="$(printf '%s' "${requested_flow}" | tr '[:upper:]' '[:lower:]')"
 
   if [[ -f "${ENV_FILE}" ]]; then
     return 0
@@ -120,54 +124,59 @@ wizard_configure_env_if_missing() {
   fi
   chmod 600 "${ENV_FILE}" 2>/dev/null || true
 
-  echo ""
-  echo "=== Initial Infrastructure Setup ==="
-  prompt_default PROXMOX_HOST "Proxmox host:port" "${PROXMOX_HOST:-pve.example.com:8006}"
-  prompt_default PROXMOX_NODE "Proxmox node" "${PROXMOX_NODE:-pve}"
-  prompt_default PROXMOX_TEMPLATE_ID "Template VMID" "${PROXMOX_TEMPLATE_ID:-280}"
-  prompt_default PROXMOX_STORAGE "Proxmox storage" "${PROXMOX_STORAGE:-local-lvm}"
-  prompt_default PROXMOX_TOKEN_ID "Proxmox token ID" "${PROXMOX_TOKEN_ID:-root@pam!deploy}"
-  prompt_default PROXMOX_TOKEN_SECRET "Proxmox token secret" "${PROXMOX_TOKEN_SECRET:-}" "1"
+  if [[ "${requested_flow_lc}" == "full" || "${requested_flow_lc}" == "provision" ]]; then
+    echo ""
+    echo "=== Initial Infrastructure Setup ==="
+    prompt_default PROXMOX_HOST "Proxmox host:port" "${PROXMOX_HOST:-pve.example.com:8006}"
+    prompt_default PROXMOX_NODE "Proxmox node" "${PROXMOX_NODE:-pve}"
+    prompt_default PROXMOX_TEMPLATE_ID "Template VMID" "${PROXMOX_TEMPLATE_ID:-280}"
+    prompt_default PROXMOX_STORAGE "Proxmox storage" "${PROXMOX_STORAGE:-local-lvm}"
+    prompt_default PROXMOX_TOKEN_ID "Proxmox token ID" "${PROXMOX_TOKEN_ID:-root@pam!deploy}"
+    prompt_default PROXMOX_TOKEN_SECRET "Proxmox token secret" "${PROXMOX_TOKEN_SECRET:-}" "1"
 
-  prompt_default OPNSENSE_HOST "OPNsense host/IP" "${OPNSENSE_HOST:-10.0.0.1}"
-  prompt_default OPNSENSE_API_KEY "OPNsense API key" "${OPNSENSE_API_KEY:-}"
-  prompt_default OPNSENSE_API_SECRET "OPNsense API secret" "${OPNSENSE_API_SECRET:-}" "1"
+    prompt_default OPNSENSE_HOST "OPNsense host/IP" "${OPNSENSE_HOST:-10.0.0.1}"
+    prompt_default OPNSENSE_API_KEY "OPNsense API key" "${OPNSENSE_API_KEY:-}"
+    prompt_default OPNSENSE_API_SECRET "OPNsense API secret" "${OPNSENSE_API_SECRET:-}" "1"
 
-  prompt_default SSH_KEY_FILE "SSH private key path" "${SSH_KEY_FILE:-$HOME/.ssh/deploy_automation}"
-  prompt_default SSH_USER "SSH user" "${SSH_USER:-root}"
+    prompt_default SSH_KEY_FILE "SSH private key path" "${SSH_KEY_FILE:-$HOME/.ssh/deploy_automation}"
+    prompt_default SSH_USER "SSH user" "${SSH_USER:-root}"
 
-  prompt_default PROXMOX_VMID_POLICY "VMID policy (nextid|range_first|range_random|manual)" "${PROXMOX_VMID_POLICY:-nextid}"
-  vmid_mode="$(printf '%s' "${PROXMOX_VMID_POLICY}" | tr '[:upper:]' '[:lower:]')"
-  case "${vmid_mode}" in
-    range_first|range_random)
-      prompt_default PROXMOX_VMID_RANGE_START "VMID range start" "${PROXMOX_VMID_RANGE_START:-200}"
-      prompt_default PROXMOX_VMID_RANGE_END "VMID range end" "${PROXMOX_VMID_RANGE_END:-299}"
-      PROXMOX_VMID=""
-      ;;
-    manual)
-      prompt_default PROXMOX_VMID "Manual VMID" "${PROXMOX_VMID:-200}"
-      ;;
-    *)
-      PROXMOX_VMID_POLICY="nextid"
-      PROXMOX_VMID=""
-      ;;
-  esac
+    prompt_default PROXMOX_VMID_POLICY "VMID policy (nextid|range_first|range_random|manual)" "${PROXMOX_VMID_POLICY:-nextid}"
+    vmid_mode="$(printf '%s' "${PROXMOX_VMID_POLICY}" | tr '[:upper:]' '[:lower:]')"
+    case "${vmid_mode}" in
+      range_first|range_random)
+        prompt_default PROXMOX_VMID_RANGE_START "VMID range start" "${PROXMOX_VMID_RANGE_START:-200}"
+        prompt_default PROXMOX_VMID_RANGE_END "VMID range end" "${PROXMOX_VMID_RANGE_END:-299}"
+        PROXMOX_VMID=""
+        ;;
+      manual)
+        prompt_default PROXMOX_VMID "Manual VMID" "${PROXMOX_VMID:-200}"
+        ;;
+      *)
+        PROXMOX_VMID_POLICY="nextid"
+        PROXMOX_VMID=""
+        ;;
+    esac
 
-  env_set_value "PROXMOX_HOST" "${PROXMOX_HOST}"
-  env_set_value "PROXMOX_NODE" "${PROXMOX_NODE}"
-  env_set_value "PROXMOX_TEMPLATE_ID" "${PROXMOX_TEMPLATE_ID}"
-  env_set_value "PROXMOX_STORAGE" "${PROXMOX_STORAGE}"
-  env_set_value "PROXMOX_TOKEN_ID" "${PROXMOX_TOKEN_ID}"
-  env_set_value "PROXMOX_TOKEN_SECRET" "${PROXMOX_TOKEN_SECRET}"
-  env_set_value "OPNSENSE_HOST" "${OPNSENSE_HOST}"
-  env_set_value "OPNSENSE_API_KEY" "${OPNSENSE_API_KEY}"
-  env_set_value "OPNSENSE_API_SECRET" "${OPNSENSE_API_SECRET}"
-  env_set_value "SSH_KEY_FILE" "${SSH_KEY_FILE}"
-  env_set_value "SSH_USER" "${SSH_USER}"
-  env_set_value "PROXMOX_VMID_POLICY" "${PROXMOX_VMID_POLICY}"
-  env_set_value "PROXMOX_VMID_RANGE_START" "${PROXMOX_VMID_RANGE_START:-200}"
-  env_set_value "PROXMOX_VMID_RANGE_END" "${PROXMOX_VMID_RANGE_END:-299}"
-  env_set_value "PROXMOX_VMID" "${PROXMOX_VMID:-}"
+    env_set_value "PROXMOX_HOST" "${PROXMOX_HOST}"
+    env_set_value "PROXMOX_NODE" "${PROXMOX_NODE}"
+    env_set_value "PROXMOX_TEMPLATE_ID" "${PROXMOX_TEMPLATE_ID}"
+    env_set_value "PROXMOX_STORAGE" "${PROXMOX_STORAGE}"
+    env_set_value "PROXMOX_TOKEN_ID" "${PROXMOX_TOKEN_ID}"
+    env_set_value "PROXMOX_TOKEN_SECRET" "${PROXMOX_TOKEN_SECRET}"
+    env_set_value "OPNSENSE_HOST" "${OPNSENSE_HOST}"
+    env_set_value "OPNSENSE_API_KEY" "${OPNSENSE_API_KEY}"
+    env_set_value "OPNSENSE_API_SECRET" "${OPNSENSE_API_SECRET}"
+    env_set_value "SSH_KEY_FILE" "${SSH_KEY_FILE}"
+    env_set_value "SSH_USER" "${SSH_USER}"
+    env_set_value "PROXMOX_VMID_POLICY" "${PROXMOX_VMID_POLICY}"
+    env_set_value "PROXMOX_VMID_RANGE_START" "${PROXMOX_VMID_RANGE_START:-200}"
+    env_set_value "PROXMOX_VMID_RANGE_END" "${PROXMOX_VMID_RANGE_END:-299}"
+    env_set_value "PROXMOX_VMID" "${PROXMOX_VMID:-}"
+  else
+    echo ""
+    echo "Proxy mode selected: skipping Proxmox/OPNsense setup prompts."
+  fi
 
   echo ""
   echo "Saved initial configuration to ${ENV_FILE}."
@@ -255,59 +264,9 @@ run_interactive_wizard() {
   local current_vmid_start="${PROXMOX_VMID_RANGE_START:-200}"
   local current_vmid_end="${PROXMOX_VMID_RANGE_END:-299}"
 
-  wizard_configure_env_if_missing
-
   echo ""
   echo "=== Homelab Deploy Wizard ==="
   echo ""
-
-  prompt_default APP_NAME "App name" "${APP_NAME:-myapp}"
-
-  # ── Resume detection ─────────────────────────────────────────────────────────
-  local _state_file _resume_from=""
-  _state_file="$(_wizard_state_file_for "${APP_NAME}")"
-  if [[ -f "${_state_file}" ]]; then
-    _wizard_load_state "${_state_file}"
-    _resume_from="$(_wizard_detect_resume_phase)"
-    if [[ "${_resume_from}" != "done" && "${_resume_from}" != "1" ]]; then
-      echo ""
-      echo "  Incomplete deployment found for '${APP_NAME}':"
-      [[ -n "${STARTED_AT:-}"  ]]                     && echo "    Started : ${STARTED_AT}"
-      [[ -n "${VMID:-}"        ]]                     && echo "    VMID    : ${VMID}"
-      [[ -n "${RESERVED_IP:-}" ]]                     && echo "    IP      : ${RESERVED_IP}"
-      [[ "${PROVISION_STATUS:-}" == "ssh_ready" ]]    && echo "    VM      : ready (SSH up)"
-      echo "    Resume  : starting from phase ${_resume_from}"
-      echo ""
-      local _do_resume=""
-      read -r -p "Resume from phase ${_resume_from}? [Y/n]: " _do_resume
-      _do_resume="$(printf '%s' "${_do_resume:-y}" | tr '[:upper:]' '[:lower:]')"
-      if [[ "${_do_resume}" != "n" && "${_do_resume}" != "no" ]]; then
-        DEPLOY_RESUME="1"
-        DEPLOY_RESUME_FROM="${_resume_from}"
-        DEPLOY_STATE_FILE="${_state_file}"
-        echo ""
-        echo "Summary (resume):"
-        echo "  App      : ${APP_NAME}"
-        echo "  Target   : ${TARGET_IP}"
-        echo "  Domain   : ${SUBDOMAIN}"
-        echo "  Resume   : phase ${_resume_from}"
-        echo ""
-        read -r -p "Run now? [Y/n]: " launch_now
-        launch_now="$(printf '%s' "${launch_now:-y}" | tr '[:upper:]' '[:lower:]')"
-        if [[ "${launch_now}" == "n" || "${launch_now}" == "no" ]]; then
-          echo "Cancelled."
-          exit 0
-        fi
-        return
-      fi
-    fi
-  fi
-  # ── End resume detection ──────────────────────────────────────────────────────
-
-  prompt_default TARGET_IP "Target IP" "${TARGET_IP:-10.0.0.50}"
-  prompt_default SUBDOMAIN "Subdomain" "${SUBDOMAIN:-myapp.example.com}"
-  validate_app_name "${APP_NAME}"
-  validate_ipv4 "${TARGET_IP}"
 
   case "${current_mode}" in
     full) mode_choice="1" ;;
@@ -331,6 +290,63 @@ run_interactive_wizard() {
       *) echo "Invalid choice." ;;
     esac
   done
+
+  prompt_default APP_NAME "App name" "${APP_NAME:-myapp}"
+  validate_app_name "${APP_NAME}"
+
+  # ── Resume detection ─────────────────────────────────────────────────────────
+  local _state_file _resume_from=""
+  _state_file="$(_wizard_state_file_for "${APP_NAME}")"
+  if [[ -f "${_state_file}" ]]; then
+    _wizard_load_state "${_state_file}"
+    _resume_from="$(_wizard_detect_resume_phase)"
+    if [[ "${_resume_from}" != "done" && "${_resume_from}" != "1" ]]; then
+      echo ""
+      echo "  Incomplete deployment found for '${APP_NAME}':"
+      [[ -n "${STARTED_AT:-}"  ]]                     && echo "    Started : ${STARTED_AT}"
+      [[ -n "${VMID:-}"        ]]                     && echo "    VMID    : ${VMID}"
+      [[ -n "${RESERVED_IP:-}" ]]                     && echo "    IP      : ${RESERVED_IP}"
+      [[ "${PROVISION_STATUS:-}" == "ssh_ready" ]]    && echo "    VM      : ready (SSH up)"
+      echo "    Resume  : starting from phase ${_resume_from}"
+      echo ""
+      local _do_resume=""
+      read -r -p "Resume from phase ${_resume_from}? [Y/n]: " _do_resume
+      _do_resume="$(printf '%s' "${_do_resume:-y}" | tr '[:upper:]' '[:lower:]')"
+      if [[ "${_do_resume}" != "n" && "${_do_resume}" != "no" ]]; then
+        DEPLOY_RESUME="1"
+        DEPLOY_RESUME_FROM="${_resume_from}"
+        DEPLOY_STATE_FILE="${_state_file}"
+        if [[ "${_resume_from}" == "proxy" ]]; then
+          DEPLOY_FLOW="proxy"
+          wizard_configure_env_if_missing "proxy"
+        else
+          DEPLOY_FLOW="full"
+          wizard_configure_env_if_missing "full"
+        fi
+        echo ""
+        echo "Summary (resume):"
+        echo "  App      : ${APP_NAME}"
+        echo "  Target   : ${TARGET_IP}"
+        echo "  Domain   : ${SUBDOMAIN}"
+        echo "  Resume   : phase ${_resume_from}"
+        echo ""
+        read -r -p "Run now? [Y/n]: " launch_now
+        launch_now="$(printf '%s' "${launch_now:-y}" | tr '[:upper:]' '[:lower:]')"
+        if [[ "${launch_now}" == "n" || "${launch_now}" == "no" ]]; then
+          echo "Cancelled."
+          exit 0
+        fi
+        return
+      fi
+    fi
+  fi
+  # ── End resume detection ──────────────────────────────────────────────────────
+
+  prompt_default TARGET_IP "Target IP" "${TARGET_IP:-10.0.0.50}"
+  prompt_default SUBDOMAIN "Subdomain" "${SUBDOMAIN:-myapp.example.com}"
+  validate_ipv4 "${TARGET_IP}"
+
+  wizard_configure_env_if_missing "${DEPLOY_FLOW}"
 
   if [[ "${DEPLOY_FLOW}" == "full" || "${DEPLOY_FLOW}" == "provision" ]]; then
     case "${current_vmid_policy}" in
@@ -440,11 +456,13 @@ run_interactive_wizard() {
   echo "  Target   : ${TARGET_IP}"
   echo "  Domain   : ${SUBDOMAIN}"
   echo "  Mode     : ${DEPLOY_FLOW}"
-  echo "  VMID     : ${PROXMOX_VMID_POLICY:-nextid}"
-  if [[ "${PROXMOX_VMID_POLICY:-nextid}" == "range_first" || "${PROXMOX_VMID_POLICY:-nextid}" == "range_random" ]]; then
-    echo "  VMID rng : ${PROXMOX_VMID_RANGE_START:-200}-${PROXMOX_VMID_RANGE_END:-299}"
-  elif [[ "${PROXMOX_VMID_POLICY:-nextid}" == "manual" ]]; then
-    echo "  VMID val : ${PROXMOX_VMID:-unset}"
+  if [[ "${DEPLOY_FLOW}" == "full" || "${DEPLOY_FLOW}" == "provision" ]]; then
+    echo "  VMID     : ${PROXMOX_VMID_POLICY:-nextid}"
+    if [[ "${PROXMOX_VMID_POLICY:-nextid}" == "range_first" || "${PROXMOX_VMID_POLICY:-nextid}" == "range_random" ]]; then
+      echo "  VMID rng : ${PROXMOX_VMID_RANGE_START:-200}-${PROXMOX_VMID_RANGE_END:-299}"
+    elif [[ "${PROXMOX_VMID_POLICY:-nextid}" == "manual" ]]; then
+      echo "  VMID val : ${PROXMOX_VMID:-unset}"
+    fi
   fi
   echo "  Proxy    : ${PROXY_PROVIDER:-none}"
   echo ""
